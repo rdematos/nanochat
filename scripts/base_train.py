@@ -52,14 +52,14 @@ grad_clip = 1.0 # gradient clipping value (0.0 = disabled)
 warmup_ratio = 0.0 # ratio of iterations for LR warmup
 warmdown_ratio = 0.2 # ratio of iterations for LR warmdown
 final_lr_frac = 0.0 # final LR is this fraction of the initial LR
-resume_from_step = -1 # resume training from this step of the optimization (-1 = disable)
+resume_from_step = 30 # resume training from this step of the optimization (-1 = disable)
 # Evaluation
 eval_every = 250 # every how many steps to evaluate the model for val bpb
 eval_tokens = 20*524288 # number of tokens to evaluate val loss on
 core_metric_every = 2000 # every how many steps to evaluate the core metric (-1 = disable)
 core_metric_max_per_task = 500 # examples per task in estimating the core metric
 sample_every = 2000 # every how many steps to sample from the model
-save_every = -1 # every how many steps to save model checkpoints (-1 = disable, and save only at the end of the run)
+save_every = 10 # every how many steps to save model checkpoints (-1 = disable, and save only at the end of the run)
 # Output
 model_tag = "" # optionally override the model tag for the output checkpoint directory name
 # now allow CLI to override the settings via the configurator lol
@@ -200,12 +200,14 @@ def get_muon_momentum(it):
 if not resuming:
     step = 0
     min_val_bpb = float("inf")
+    val_bpb = None # will be set on first evaluation
     smooth_train_loss = 0 # EMA of training loss
     total_training_time = 0 # total wall-clock time of training
 else:
     step = meta_data["step"]
     loop_state = meta_data["loop_state"]
     min_val_bpb = loop_state["min_val_bpb"]
+    val_bpb = meta_data.get("val_bpb", None) # restore last validation bpb
     smooth_train_loss = loop_state["smooth_train_loss"]
     total_training_time = loop_state["total_training_time"]
 
@@ -272,25 +274,28 @@ while True:
 
     # save checkpoint: at the end of the run, or every save_every steps, except at the first step or the resume step
     if last_step or (step > 0 and step != resume_from_step and save_every > 0 and step % save_every == 0):
+        checkpoint_metadata = {
+            "step": step,
+            "model_config": model_config_kwargs,
+            "user_config": user_config, # inputs to the training script
+            "device_batch_size": device_batch_size,
+            "max_seq_len": max_seq_len,
+            "dataloader_state_dict": dataloader_state_dict,
+            "loop_state": { # all loop state (other than step) so that we can resume training
+                "min_val_bpb": min_val_bpb,
+                "smooth_train_loss": smooth_train_loss,
+                "total_training_time": total_training_time,
+            },
+        }
+        # Only save val_bpb if we've done at least one evaluation
+        if val_bpb is not None:
+            checkpoint_metadata["val_bpb"] = val_bpb
         save_checkpoint(
             checkpoint_dir,
             step,
             orig_model.state_dict(), # model parameters
             [opt.state_dict() for opt in optimizers], # optimizer states
-            { # metadata saved as json
-                "step": step,
-                "val_bpb": val_bpb, # loss at last step
-                "model_config": model_config_kwargs,
-                "user_config": user_config, # inputs to the training script
-                "device_batch_size": device_batch_size,
-                "max_seq_len": max_seq_len,
-                "dataloader_state_dict": dataloader_state_dict,
-                "loop_state": { # all loop state (other than step) so that we can resume training
-                    "min_val_bpb": min_val_bpb,
-                    "smooth_train_loss": smooth_train_loss,
-                    "total_training_time": total_training_time,
-                },
-            },
+            checkpoint_metadata,
             rank=ddp_rank,
         )
 
@@ -384,7 +389,7 @@ get_report().log(section="Base model training", data=[
     },
     { # stats about training outcomes
         "Minimum validation bpb": min_val_bpb,
-        "Final validation bpb": val_bpb,
+        "Final validation bpb": val_bpb if val_bpb is not None else "N/A",
         "CORE metric estimate": results.get("core_metric", None),
         "MFU %": f"{mfu:.2f}%",
         "Total training flops": f"{flops_so_far:e}",
@@ -396,3 +401,4 @@ get_report().log(section="Base model training", data=[
 # cleanup
 wandb_run.finish() # wandb run finish
 compute_cleanup()
+

@@ -11,7 +11,7 @@
 # 3) Example launch with wandb logging, but see below for setting up wandb first:
 # WANDB_RUN=speedrun screen -L -Logfile speedrun.log -S speedrun bash speedrun.sh
 # 4) Example launch in Docker (auto-detects pre-installed PyTorch, avoids CUDA conflicts):
-# docker run --gpus all -it --rm --ipc=host -v $HOME/.cache/huggingface:/root/.cache/huggingface -v $HOME/.cache/nanochat:/root/.cache/nanochat -v ${PWD}:/workspace -w /workspace nvcr.io/nvidia/pytorch:25.09-py3 bash speedrun.sh
+# docker run --gpus all -it --rm --ipc=host -v $HOME/.cache/nanochat:/root/.cache/nanochat -v ${PWD}:/workspace -w /workspace nvcr.io/nvidia/pytorch:25.09-py3 bash speedrun.sh
 # 5) Force specific number of GPUs (override auto-detection):
 # NPROC_PER_NODE=4 bash speedrun.sh
 #
