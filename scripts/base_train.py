@@ -344,7 +344,9 @@ while True:
     tok_per_sec = int(total_batch_size / dt)
     flops_per_sec = num_flops_per_token * total_batch_size / dt
     promised_flops_per_sec_h100 = 989e12 * ddp_world_size # bfloat16 H100 SXM and without 2:4 sparsity
-    mfu = 100 * flops_per_sec / promised_flops_per_sec_h100 # in %
+    promised_flops_per_sec_gb10 = 250e12 * ddp_world_size # bfloat16 GB10 SXM and without 2:4 sparsity
+    #mfu = 100 * flops_per_sec / promised_flops_per_sec_h100 # in %
+    mfu = 100 * flops_per_sec / promised_flops_per_sec_gb10 # in %
     if step > 10:
         total_training_time += dt # only count the time after the first 10 steps
     print_grad_norm = f" grad norm: {grad_norm:.4f} |" if grad_clip_enabled else ""
