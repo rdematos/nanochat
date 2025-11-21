@@ -1,42 +1,151 @@
 #!/bin/bash
 
 # This script is the "Best ChatGPT clone that $100 can buy",
-# It is designed to run in ~4 hours on 8XH100 node at $3/GPU/hour.
+# It is designed to run in ~4 hours on 8xH100 node at $3/GPU/hour.
+# The script auto-detects available GPUs and scales accordingly.
 
-# 1) Example launch (simplest):
+# 1) Example launch (simplest, auto-detects GPUs):
 # bash speedrun.sh
 # 2) Example launch in a screen session (because the run takes ~4 hours):
 # screen -L -Logfile speedrun.log -S speedrun bash speedrun.sh
 # 3) Example launch with wandb logging, but see below for setting up wandb first:
 # WANDB_RUN=speedrun screen -L -Logfile speedrun.log -S speedrun bash speedrun.sh
+# 4) Example launch in Docker (auto-detects pre-installed PyTorch, avoids CUDA conflicts):
+# docker run --gpus all -it --rm --ipc=host -v $HOME/.cache/huggingface:/root/.cache/huggingface -v $HOME/.cache/nanochat:/root/.cache/nanochat -v ${PWD}:/workspace -w /workspace nvcr.io/nvidia/pytorch:25.09-py3 bash speedrun.sh
+# 5) Force specific number of GPUs (override auto-detection):
+# NPROC_PER_NODE=4 bash speedrun.sh
+#
+# Note: The script detects if PyTorch with CUDA is already installed (e.g., in a container)
+# and skips venv creation to use the pre-installed version, avoiding CUDA reinstallation.
 
 # Default intermediate artifacts directory is in ~/.cache/nanochat
 export OMP_NUM_THREADS=1
 export NANOCHAT_BASE_DIR="$HOME/.cache/nanochat"
 mkdir -p $NANOCHAT_BASE_DIR
 
+# Suppress PyTorch's pynvml deprecation warning (PyTorch's own dependency issue)
+export PYTHONWARNINGS="ignore::FutureWarning:torch.cuda"
+
+# Load environment variables from .env file if it exists
+if [ -f .env ]; then
+    export $(grep -v '^#' .env | xargs)
+    echo "Loaded environment variables from .env file"
+fi
+
 # -----------------------------------------------------------------------------
 # Python venv setup with uv
 
-# install uv (if not already installed)
-command -v uv &> /dev/null || curl -LsSf https://astral.sh/uv/install.sh | sh
-# create a .venv local virtual environment (if it doesn't exist)
-[ -d ".venv" ] || uv venv
-# install the repo dependencies
-uv sync --extra gpu
-# activate venv so that `python` uses the project's venv instead of system python
-source .venv/bin/activate
+# Detect if we're in a container with PyTorch already installed (e.g., NVIDIA PyTorch container)
+# If so, skip venv creation and use the system Python to avoid CUDA conflicts
+PYTORCH_PREINSTALLED=false
+# Clean up any broken venv from previous runs if we detect PyTorch is pre-installed
+if python -c "import torch" 2>/dev/null && python -c "import torch; exit(0 if torch.cuda.is_available() else 1)" 2>/dev/null; then
+    if [ -d ".venv" ]; then
+        echo "Detected pre-installed PyTorch and existing .venv - removing .venv to avoid conflicts..."
+        rm -rf .venv
+    fi
+fi
+PYTORCH_PREINSTALLED=false
+if python -c "import torch" 2>/dev/null && python -c "import torch; exit(0 if torch.cuda.is_available() else 1)" 2>/dev/null; then
+    echo "Detected PyTorch with CUDA already installed (likely running in container)"
+    echo "Skipping venv creation to use pre-installed PyTorch and avoid CUDA conflicts"
+    PYTORCH_PREINSTALLED=true
+fi
+
+if [ "$PYTORCH_PREINSTALLED" = false ]; then
+    # install uv (if not already installed)
+    if ! command -v uv &> /dev/null; then
+        curl -LsSf https://astral.sh/uv/install.sh | sh
+        # Add uv to PATH for this session
+        export PATH="$HOME/.cargo/bin:$PATH"
+    fi
+    # create a .venv local virtual environment (if it doesn't exist)
+    [ -d ".venv" ] || uv venv
+    # install the repo dependencies (this will install PyTorch with CUDA)
+    uv sync --extra gpu
+    # activate venv so that `python` uses the project's venv instead of system python
+    source .venv/bin/activate
+else
+    # Install only non-PyTorch dependencies using system Python
+    if ! command -v uv &> /dev/null; then
+        curl -LsSf https://astral.sh/uv/install.sh | sh
+        export PATH="$HOME/.cargo/bin:$PATH"
+    fi
+    # Install dependencies without the gpu extra (which includes PyTorch)
+    # Use pip to install all required packages from pyproject.toml except torch
+    # Also install nvidia-ml-py to replace deprecated pynvml
+    pip install -q datasets fastapi files-to-prompt psutil regex setuptools tiktoken tokenizers uvicorn wandb maturin nvidia-ml-py
+    echo "Installed dependencies using system Python with pre-installed PyTorch"
+fi
+
+# -----------------------------------------------------------------------------
+# GPU Prerequisites Check
+
+echo "Checking GPU prerequisites..."
+
+# Check if nvidia-smi is available
+if ! command -v nvidia-smi &> /dev/null; then
+    echo "ERROR: nvidia-smi not found. GPU drivers may not be installed properly."
+    echo "If running in Docker, make sure to use --gpus all flag."
+    exit 1
+fi
+
+# Check if GPUs are available
+GPU_COUNT=$(nvidia-smi --query-gpu=name --format=csv,noheader | wc -l)
+if [ "$GPU_COUNT" -eq 0 ]; then
+    echo "ERROR: No GPUs detected. Please check your GPU setup."
+    exit 1
+fi
+
+echo "Found $GPU_COUNT GPU(s):"
+nvidia-smi --query-gpu=index,name,memory.total --format=csv
+
+# Verify PyTorch can see GPUs
+echo "Verifying PyTorch GPU access..."
+python -c "import torch; assert torch.cuda.is_available(), 'CUDA not available in PyTorch'; print(f'PyTorch can see {torch.cuda.device_count()} GPU(s)'); print(f'CUDA Version: {torch.version.cuda}')" || {
+    echo "ERROR: PyTorch cannot access CUDA GPUs"
+    exit 1
+}
+
+# Auto-detect and set number of GPUs to use
+# Override with NPROC_PER_NODE environment variable if set
+if [ -z "$NPROC_PER_NODE" ]; then
+    NPROC_PER_NODE=$GPU_COUNT
+    echo "Auto-detected $NPROC_PER_NODE GPU(s) for training"
+else
+    echo "Using $NPROC_PER_NODE GPU(s) (set via NPROC_PER_NODE environment variable)"
+fi
+
+# Verify we don't try to use more GPUs than available
+if [ "$NPROC_PER_NODE" -gt "$GPU_COUNT" ]; then
+    echo "WARNING: Requested $NPROC_PER_NODE GPUs but only $GPU_COUNT available. Using $GPU_COUNT instead."
+    NPROC_PER_NODE=$GPU_COUNT
+fi
+
+echo "GPU prerequisites check passed ✓"
+echo ""
 
 # -----------------------------------------------------------------------------
 # wandb setup
 # If you wish to use wandb for logging (it's nice!, recommended).
-# 1) Make sure to first log in to wandb, e.g. run:
-#    `wandb login`
-# 2) Set the WANDB_RUN environment variable when running this script, e.g.:
-#    `WANDB_RUN=d26 bash speedrun.sh`
+# The WANDB_API_KEY is loaded from .env file automatically.
+# Set the WANDB_RUN environment variable when running this script, e.g.:
+#    `WANDB_RUN=speedrun bash speedrun.sh`
+# If WANDB_API_KEY is set and WANDB_RUN is not "dummy", wandb will be used for tracking.
 if [ -z "$WANDB_RUN" ]; then
-    # by default use "dummy" : it's handled as a special case, skips logging to wandb
-    WANDB_RUN=dummy
+    if [ -n "$WANDB_API_KEY" ]; then
+        # If API key is set but no run name specified, use a default run name
+        WANDB_RUN="speedrun-$(date +%Y%m%d-%H%M%S)"
+        echo "Using wandb for tracking with run name: $WANDB_RUN"
+    else
+        # by default use "dummy" : it's handled as a special case, skips logging to wandb
+        WANDB_RUN=dummy
+        echo "No WANDB_API_KEY found, skipping wandb logging"
+    fi
+else
+    if [ -n "$WANDB_API_KEY" ] && [ "$WANDB_RUN" != "dummy" ]; then
+        echo "Using wandb for tracking with run name: $WANDB_RUN"
+    fi
 fi
 
 # -----------------------------------------------------------------------------
@@ -48,12 +157,29 @@ python -m nanochat.report reset
 # -----------------------------------------------------------------------------
 # Tokenizer
 
-# Install Rust / Cargo
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
-source "$HOME/.cargo/env"
+# Install Rust / Cargo (if not already installed)
+if ! command -v cargo &> /dev/null; then
+    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+    source "$HOME/.cargo/env"
+else
+    # Ensure cargo is in PATH even if already installed
+    export PATH="$HOME/.cargo/bin:$PATH"
+fi
 
 # Build the rustbpe Tokenizer
-uv run maturin develop --release --manifest-path rustbpe/Cargo.toml
+if [ "$PYTORCH_PREINSTALLED" = true ]; then
+    # In container with pre-installed PyTorch, build wheel and install with pip
+    echo "Building tokenizer with maturin (using system Python)..."
+    cd rustbpe
+    # Clean old wheels to avoid version conflicts
+    rm -rf target/wheels
+    maturin build --release
+    pip install --force-reinstall target/wheels/*.whl
+    cd ..
+else
+    # On native system with venv, use uv run
+    uv run maturin develop --release --manifest-path rustbpe/Cargo.toml
+fi
 
 # Download the first ~2B characters of pretraining dataset
 # look at dev/repackage_data_reference.py for details on how this data was prepared
@@ -82,8 +208,8 @@ python -m scripts.tok_eval
 echo "Waiting for dataset download to complete..."
 wait $DATASET_DOWNLOAD_PID
 
-# Number of processes/GPUs to use
-NPROC_PER_NODE=8
+# Number of processes/GPUs to use (auto-detected above in GPU prerequisites check)
+# You can override by setting NPROC_PER_NODE environment variable before running this script
 
 # pretrain the d20 model
 torchrun --standalone --nproc_per_node=$NPROC_PER_NODE -m scripts.base_train -- --depth=20 --run=$WANDB_RUN

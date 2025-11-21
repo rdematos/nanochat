@@ -22,6 +22,7 @@ Alternatively, since the script runs for 4 hours, I like to launch it like this 
 
 ```bash
 screen -L -Logfile speedrun.log -S speedrun bash speedrun.sh
+screen -L -Logfile speedrun.log -S speedrun docker run --gpus all -it --rm --ipc=host --env-file .env -e WANDB_RUN=nanochat-speedrun-GB10 -v $HOME/.cache/huggingface:/root/.cache/huggingface -v $HOME/.cache/nanochat:/root/.cache/nanochat -v ${PWD}:/workspace -w /workspace nvcr.io/nvidia/pytorch:25.09-py3 bash speedrun.sh
 ```
 
 See the [screen cheatsheet](https://gist.github.com/jctosta/af918e1618682638aa82) if you are less familiar. You can watch it go inside the screen session, or detach with `Ctrl-a d` and `tail speedrun.log` to view progress. Now wait 4 hours. Once it's done, you can talk to your LLM via the ChatGPT-like web UI. Make sure again that your local uv virtual environment is active (run `source .venv/bin/activate`), and serve it:
