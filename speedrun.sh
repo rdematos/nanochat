@@ -211,20 +211,11 @@ wait $DATASET_DOWNLOAD_PID
 # Number of processes/GPUs to use (auto-detected above in GPU prerequisites check)
 # You can override by setting NPROC_PER_NODE environment variable before running this script
 
-# Clear GPU memory between stages
-python -c "import torch; torch.cuda.empty_cache()"
-
 # pretrain the d20 model
 torchrun --standalone --nproc_per_node=$NPROC_PER_NODE -m scripts.base_train -- --depth=20 --run=$WANDB_RUN
 
-# Clear GPU memory between stages
-python -c "import torch; torch.cuda.empty_cache()"
-
 # evaluate the model on a larger chunk of train/val data and draw some samples
 torchrun --standalone --nproc_per_node=$NPROC_PER_NODE -m scripts.base_loss
-
-# Clear GPU memory between stages
-python -c "import torch; torch.cuda.empty_cache()"
 
 # evaluate the model on CORE tasks
 torchrun --standalone --nproc_per_node=$NPROC_PER_NODE -m scripts.base_eval
@@ -236,27 +227,17 @@ torchrun --standalone --nproc_per_node=$NPROC_PER_NODE -m scripts.base_eval
 # see dev/gen_sft_data.py for details on how this data was prepared and to get a sense of how you can easily tune it
 curl -L -o $NANOCHAT_BASE_DIR/identity_conversations.jsonl https://karpathy-public.s3.us-west-2.amazonaws.com/identity_conversations.jsonl
 
-# Clear GPU memory between stages
-python -c "import torch; torch.cuda.empty_cache()"
-
 # run midtraining and eval the model
 torchrun --standalone --nproc_per_node=$NPROC_PER_NODE -m scripts.mid_train -- --run=$WANDB_RUN
-
-# Clear GPU memory between stages
-python -c "import torch; torch.cuda.empty_cache()"
 
 torchrun --standalone --nproc_per_node=$NPROC_PER_NODE -m scripts.chat_eval -- -i mid
 
 # -----------------------------------------------------------------------------
 # Supervised Finetuning (domain adaptation to each sequence all by itself per row)
 
-# Clear GPU memory between stages
-python -c "import torch; torch.cuda.empty_cache()"
 
 # train sft and re-eval right away (should see a small bump)
 torchrun --standalone --nproc_per_node=$NPROC_PER_NODE -m scripts.chat_sft -- --run=$WANDB_RUN
-# Clear GPU memory between stages
-python -c "import torch; torch.cuda.empty_cache()"
 torchrun --standalone --nproc_per_node=$NPROC_PER_NODE -m scripts.chat_eval -- -i sft
 
 # chat with the model over CLI! Leave out the -p to chat interactively
